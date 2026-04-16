@@ -1,11 +1,11 @@
 ## surya - CLIP-based image vector store
 import os
+import open_clip
+import torch
 import faiss
 import numpy as np
 import pickle
 from PIL import Image
-import open_clip
-import torch
 
 class CLIPImageStore:
     def __init__(self, persist_dir: str = "faiss_store_images"):

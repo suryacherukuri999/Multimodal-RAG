@@ -16,3 +16,4 @@ open-clip-torch
 docx2txt
 flask
 requests
+opencv-python

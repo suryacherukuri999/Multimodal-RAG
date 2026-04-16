@@ -26,6 +26,7 @@ app = Flask(__name__)
 # ── Globals (initialized in main) ──────────────────────────────────────────
 clip_store = None
 pdf_store = None
+video_store = None
 NODE_ID = "unknown"
 THUMBNAIL_MAX_SIZE = (512, 512)
 
@@ -105,6 +106,69 @@ def fetch_image():
         return jsonify({"error": str(e), "node_id": NODE_ID}), 500
 
 
+# ── Video Endpoints ────────────────────────────────────────────────────
+
+@app.route("/search/videos/scores", methods=["POST"])
+def search_video_scores():
+    if video_store is None or video_store.index is None:
+        return jsonify({"error": "Video index not loaded", "node_id": NODE_ID}), 503
+
+    data = request.get_json()
+    query = data.get("query", "")
+    top_k = data.get("top_k", 5)
+
+    if not query:
+        return jsonify({"error": "Missing 'query'"}), 400
+
+    try:
+        results = video_store.query_text(query, top_k=top_k)
+        response = []
+        for r in results:
+            meta = r["metadata"]
+            response.append({
+                "score": round(r["score"], 6),
+                "filename": os.path.basename(meta["image_path"]),
+                "video_name": meta.get("video_name", "unknown"),
+                "timestamp_sec": meta.get("timestamp_sec", 0),
+                "frame_index": meta.get("frame_index", 0),
+                "node_id": NODE_ID
+            })
+        return jsonify(response)
+    except Exception as e:
+        return jsonify({"error": str(e), "node_id": NODE_ID}), 500
+
+
+@app.route("/search/videos/fetch", methods=["POST"])
+def fetch_video_frame():
+    if video_store is None:
+        return jsonify({"error": "Video index not loaded", "node_id": NODE_ID}), 503
+
+    data = request.get_json()
+    filename = data.get("filename", "")
+
+    if not filename:
+        return jsonify({"error": "Missing 'filename'"}), 400
+
+    target_path = None
+    for meta in video_store.metadata:
+        if os.path.basename(meta["image_path"]) == filename:
+            target_path = meta["image_path"]
+            break
+
+    if target_path is None or not os.path.exists(target_path):
+        return jsonify({"error": f"Video frame '{filename}' not found", "node_id": NODE_ID}), 404
+
+    try:
+        b64 = make_thumbnail_b64(target_path)
+        return jsonify({
+            "image_base64": b64,
+            "filename": filename,
+            "node_id": NODE_ID
+        })
+    except Exception as e:
+        return jsonify({"error": str(e), "node_id": NODE_ID}), 500
+
+
 # ── PDF Endpoint ───────────────────────────────────────────────────────────
 
 @app.route("/search/pdfs", methods=["POST"])
@@ -144,7 +208,9 @@ def health():
         "status": "ok",
         "has_images": clip_store is not None and clip_store.index is not None,
         "has_pdfs": pdf_store is not None and pdf_store.index is not None,
+        "has_videos": video_store is not None and video_store.index is not None,
         "image_count": len(clip_store.metadata) if clip_store and clip_store.metadata else 0,
+        "video_frame_count": len(video_store.metadata) if video_store and video_store.metadata else 0,
     })
 
 
@@ -152,7 +218,7 @@ def health():
 
 def init_stores(config):
     """Initialize stores using directories from config."""
-    global clip_store, pdf_store
+    global clip_store, pdf_store, video_store
 
     data_dir = config.get("data_dir", "data")
     faiss_images_dir = config.get("faiss_store_images_dir", "faiss_store_images")
@@ -176,6 +242,27 @@ def init_stores(config):
             print(f"[SERVER] CLIP index built from '{data_dir}': {len(clip_store.metadata)} images")
         else:
             print(f"[SERVER] No images in '{data_dir}' — image search disabled")
+
+    # ── Video CLIP index ──
+    faiss_videos_dir = config.get("faiss_store_videos_dir", "faiss_store_videos")
+    video_frames_dir = config.get("video_frames_dir", "video_frames")
+    video_index_path = os.path.join(faiss_videos_dir, "clip_video.index")
+    video_meta_path = os.path.join(faiss_videos_dir, "clip_video_meta.pkl")
+    if os.path.exists(video_index_path) and os.path.exists(video_meta_path):
+        from src.clip_store_video import CLIPVideoStore
+        video_store = CLIPVideoStore(persist_dir=faiss_videos_dir)
+        video_store.load()
+        print(f"[SERVER] Video CLIP index loaded from '{faiss_videos_dir}': {len(video_store.metadata)} frames")
+    else:
+        from src.video_extractor_video import extract_all_videos
+        frame_metadata = extract_all_videos(data_dir, output_dir=video_frames_dir)
+        if frame_metadata:
+            from src.clip_store_video import CLIPVideoStore
+            video_store = CLIPVideoStore(persist_dir=faiss_videos_dir)
+            video_store.build_from_frames(frame_metadata)
+            print(f"[SERVER] Video CLIP index built from '{data_dir}': {len(video_store.metadata)} frames")
+        else:
+            print(f"[SERVER] No videos in '{data_dir}' — video search disabled")
 
     # ── PDF index ──
     faiss_path = os.path.join(faiss_pdfs_dir, "faiss.index")

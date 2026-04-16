@@ -255,6 +255,147 @@ class FederatedSearch:
         all_results.sort(key=lambda x: x["distance"])
         return all_results[:top_k]
 
+    # ── Federated Video Search (Two-Phase) ──────────────────────────────────
+
+    def _query_peer_video_scores(self, peer_url: str, query: str, top_k: int) -> List[Dict]:
+        """Phase 1: Get video frame scores from a peer (lightweight)."""
+        try:
+            resp = requests.post(
+                f"{peer_url}/search/videos/scores",
+                json={"query": query, "top_k": top_k},
+                timeout=self.timeout
+            )
+            if resp.status_code == 200:
+                return resp.json()
+            else:
+                print(f"[FEDERATION] Peer {peer_url} returned {resp.status_code}: {resp.text}")
+                return []
+        except requests.exceptions.Timeout:
+            print(f"[FEDERATION] Peer {peer_url} timed out (video scores)")
+            return []
+        except requests.exceptions.ConnectionError:
+            print(f"[FEDERATION] Peer {peer_url} unreachable (video scores)")
+            return []
+        except Exception as e:
+            print(f"[FEDERATION] Error querying peer {peer_url} for video scores: {e}")
+            return []
+
+    def _fetch_peer_video_frame(self, peer_url: str, filename: str) -> Optional[Dict]:
+        """Phase 2: Fetch actual video frame image from the winning peer."""
+        try:
+            resp = requests.post(
+                f"{peer_url}/search/videos/fetch",
+                json={"filename": filename},
+                timeout=self.timeout + 5
+            )
+            if resp.status_code == 200:
+                return resp.json()
+            else:
+                print(f"[FEDERATION] Failed to fetch video frame from {peer_url}: {resp.status_code}")
+                return None
+        except Exception as e:
+            print(f"[FEDERATION] Error fetching video frame from {peer_url}: {e}")
+            return None
+
+    def search_videos(self, local_results: List[Dict], query: str, top_k: int = 5) -> List[Dict]:
+        """
+        Federated video search using two-phase approach.
+
+        Args:
+            local_results: Results from local CLIP video search
+                [{"score": float, "metadata": {"image_path", "timestamp_sec", "video_name", ...}}]
+            query: The search query
+            top_k: Number of final results to return
+
+        Returns:
+            Merged results sorted by score (highest first).
+            Each result has: score, filename, video_name, timestamp_sec, node_id, source,
+            and either image_path (local) or image_base64 (remote).
+        """
+        # Normalize local results
+        all_scored = []
+        for r in local_results:
+            meta = r["metadata"]
+            all_scored.append({
+                "score": r["score"],
+                "filename": os.path.basename(meta["image_path"]),
+                "video_name": meta.get("video_name", "unknown"),
+                "video_path": meta.get("video_path", ""),
+                "timestamp_sec": meta.get("timestamp_sec", 0),
+                "frame_index": meta.get("frame_index", 0),
+                "node_id": self.node_id,
+                "source": "local",
+                "image_path": meta["image_path"],
+                "peer_url": None
+            })
+
+        if not self.peers:
+            all_scored.sort(key=lambda x: x["score"], reverse=True)
+            return all_scored[:top_k]
+
+        # ── Phase 1: Collect scores from all peers in parallel ──
+        print(f"[FEDERATION] Phase 1: Querying {len(self.peers)} peer(s) for video scores...")
+        with ThreadPoolExecutor(max_workers=len(self.peers)) as executor:
+            future_to_peer = {
+                executor.submit(self._query_peer_video_scores, peer, query, top_k): peer
+                for peer in self.peers
+            }
+            for future in as_completed(future_to_peer):
+                peer_url = future_to_peer[future]
+                try:
+                    peer_results = future.result()
+                    for pr in peer_results:
+                        all_scored.append({
+                            "score": pr["score"],
+                            "filename": pr["filename"],
+                            "video_name": pr.get("video_name", "unknown"),
+                            "video_path": "",
+                            "timestamp_sec": pr.get("timestamp_sec", 0),
+                            "frame_index": pr.get("frame_index", 0),
+                            "node_id": pr.get("node_id", "unknown"),
+                            "source": "remote",
+                            "image_path": None,
+                            "peer_url": peer_url
+                        })
+                    print(f"[FEDERATION] Got {len(peer_results)} video score(s) from {peer_url}")
+                except Exception as e:
+                    print(f"[FEDERATION] Failed to get video scores from {peer_url}: {e}")
+
+        # Sort all by score (CLIP cosine similarity — higher is better)
+        all_scored.sort(key=lambda x: x["score"], reverse=True)
+        top_results = all_scored[:top_k]
+
+        # ── Phase 2: Fetch actual frame images for remote winners ──
+        remote_winners = [r for r in top_results if r["source"] == "remote"]
+        if remote_winners:
+            print(f"[FEDERATION] Phase 2: Fetching {len(remote_winners)} video frame(s) from peer(s)...")
+            with ThreadPoolExecutor(max_workers=len(remote_winners)) as executor:
+                future_to_result = {
+                    executor.submit(
+                        self._fetch_peer_video_frame, r["peer_url"], r["filename"]
+                    ): r
+                    for r in remote_winners
+                }
+                for future in as_completed(future_to_result):
+                    result_entry = future_to_result[future]
+                    try:
+                        fetched = future.result()
+                        if fetched and "image_base64" in fetched:
+                            result_entry["image_base64"] = fetched["image_base64"]
+                            print(f"[FEDERATION] Fetched frame '{result_entry['filename']}' from {result_entry['node_id']}")
+                        else:
+                            print(f"[FEDERATION] Could not fetch frame '{result_entry['filename']}'")
+                    except Exception as e:
+                        print(f"[FEDERATION] Fetch failed for frame '{result_entry['filename']}': {e}")
+
+        # Log final ranking
+        for i, r in enumerate(top_results):
+            src = f"local ({r['image_path']})" if r["source"] == "local" else f"remote ({r['node_id']})"
+            print(f"[FEDERATION] #{i+1} score={r['score']:.4f} video={r['video_name']} "
+                  f"t={r['timestamp_sec']}s file={r['filename']} from={src}")
+
+        return top_results
+
     # ── Network Discovery ──────────────────────────────────────────────────
 
     def discover_peers(self) -> List[Dict]:

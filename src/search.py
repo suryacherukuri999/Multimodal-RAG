@@ -56,6 +56,7 @@ class RAGSearch:
             texts = [r["metadata"].get("text", "") for r in results if r["metadata"]]
 
         context = "\n\n".join(texts)
+        print(context)
         if not context:
             return "No relevant documents found."
 

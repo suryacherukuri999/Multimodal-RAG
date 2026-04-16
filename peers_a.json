@@ -4,6 +4,8 @@
     "data_dir": "data_a",
     "faiss_store_dir": "faiss_store_m4",
     "faiss_store_images_dir": "faiss_store_images_m4",
+    "faiss_store_videos_dir": "faiss_store_videos_m4",
+    "video_frames_dir": "video_frames_m4",
     "peers": [
         "http://localhost:8001"
     ],

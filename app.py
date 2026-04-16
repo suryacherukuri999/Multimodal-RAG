@@ -33,6 +33,33 @@ def run_images(query, config_path=None, federated=False):
         print("No relevant images found.")
 
 
+def run_videos(query, config_path=None, federated=False, data_dir="data", frames_dir="video_frames"):
+    from src.search_video import VideoRAGSearch
+    rag_search = VideoRAGSearch(config_path=config_path, federated=federated,
+                                data_dir=data_dir, frames_dir=frames_dir)
+    result = rag_search.search_and_summarize(query)
+
+    print(f"\nQuery: '{query}'")
+    if result["videos"]:
+        print(f"Source video(s): {', '.join(result['videos'])}")
+    print(f"\nAnswer: {result['answer']}")
+
+    if result["frames"]:
+        print(f"\nMatched frames:")
+        for f in result["frames"]:
+            node_info = ""
+            if f.get("source") == "remote":
+                node_info = f"  [FROM: {f.get('node_id', 'remote')}]"
+            elif f.get("node_id"):
+                node_info = f"  [FROM: {f.get('node_id', 'local')}]"
+
+            print(f"  [{f['timestamp']}] {f['video_name']} — score={f['score']}{node_info}")
+            try:
+                subprocess.run(["chafa", "--size=40x20", f["path"]], check=False)
+            except FileNotFoundError:
+                print(f"  (install 'chafa' to view frames in terminal)")
+
+
 def run_discover(config_path=None):
     from src.federation import FederatedSearch
     fed = FederatedSearch(config_path=config_path or "peers.json")
@@ -61,6 +88,10 @@ Examples:
   python app.py --config peers_a.json --images --federated --query "laughing dog"
   python app.py --config peers_a.json --pdfs --federated --query "attention mechanism"
 
+  # Search through videos
+  python app.py --videos --query "is there a red car?"
+  python app.py --videos --query "how many injured persons?" --data-dir data
+
   # Check which peers are online
   python app.py --config peers_a.json --discover
 
@@ -73,14 +104,21 @@ Examples:
                         help="Path to node config (peers_a.json, peers_b.json, etc.)")
     parser.add_argument("--pdfs", action="store_true", help="Search through PDFs")
     parser.add_argument("--images", action="store_true", help="Search through images")
+    parser.add_argument("--videos", action="store_true", help="Search through videos")
     parser.add_argument("--query", type=str, default="What is attention mechanism?", help="Search query")
     parser.add_argument("--federated", action="store_true", help="Enable federated search across peers")
     parser.add_argument("--discover", action="store_true", help="Check peer connectivity")
     parser.add_argument("--rebuild", action="store_true", help="Rebuild indexes before searching")
+    parser.add_argument("--data-dir", type=str, default=None, help="Data directory (for videos)")
+    parser.add_argument("--frames-dir", type=str, default="video_frames", help="Directory to store extracted video frames")
     args = parser.parse_args()
 
     if args.discover:
         run_discover(args.config)
+    elif args.videos:
+        data_dir = args.data_dir or "data"
+        run_videos(args.query, config_path=args.config, federated=args.federated,
+                   data_dir=data_dir, frames_dir=args.frames_dir)
     elif args.images:
         run_images(args.query, config_path=args.config, federated=args.federated)
     else:
